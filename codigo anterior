@@ -1,0 +1,317 @@
+import streamlit as st
+import pandas as pd
+from datetime import date
+from services import AutoService, InventarioService, VentasService, AdministracionService
+
+# Configuración inicial de la página
+st.set_page_config(
+    page_title="Sistema POS - Gestión Comercial",
+    page_icon="🛒",
+    layout="wide"
+)
+
+# Inicializar el estado de sesión para el usuario si no existe
+if "usuario" not in st.session_state:
+    st.session_state.usuario = None
+
+def pantalla_login():
+    """Muestra la interfaz de inicio de sesión."""
+    st.title("🔐 Iniciar Sesión - Sistema POS")
+    
+    with st.form("form_login"):
+        username = st.text_input("Usuario")
+        password = st.text_input("Contraseña", type="password")
+        submit = st.form_submit_button("Ingresar al Sistema")
+        
+        if submit:
+            usuario = AutoService.autenticar_usuario(username, password)
+            if usuario:
+                st.session_state.usuario = usuario
+                st.success(f"¡Bienvenido, {usuario['nombre_completo']}!")
+                st.rerun()
+            else:
+                st.error("Usuario o contraseña incorrectos.")
+
+def main():
+    """Controlador principal de la aplicación en Streamlit."""
+    
+    # Si no hay usuario autenticado, mostrar login
+    if st.session_state.usuario is None:
+        pantalla_login()
+        return
+
+    usuario = st.session_state.usuario
+
+    # Barra lateral de navegación y perfil
+    st.sidebar.title("Panel de Control")
+    st.sidebar.write(f"👤 **{usuario['nombre_completo']}**")
+    st.sidebar.caption(f"Rol: {usuario['rol']}")
+    st.sidebar.divider()
+
+    # Menú completo incluyendo Compras de forma segura
+    menu_opciones = [
+        "🏠 Inicio", 
+        "🛒 Ventas (POS)", 
+        "📦 Inventario y Catálogo", 
+        "📥 Compras y Entradas", 
+        "📊 Administración y Reportes", 
+        "👥 Gestión de Usuarios", 
+        "🚪 Cerrar Sesión"
+    ]
+    
+    seleccion = st.sidebar.selectbox("Navegación", menu_opciones)
+
+    # ==========================================
+    # 1. PANTALLA DE INICIO
+    # ==========================================
+    if seleccion == "🏠 Inicio":
+        st.title("🏠 Panel Principal")
+        st.write("Bienvenido al sistema integrado de gestión comercial y POS.")
+        
+        st.subheader("⚠️ Alertas de Stock Mínimo")
+        try:
+            alertas = InventarioService.obtener_alertas_stock_minimo()
+            if alertas:
+                st.warning("Hay productos que se encuentran en o por debajo de su stock mínimo configurado.")
+                st.dataframe(pd.DataFrame(alertas), use_container_width=True)
+            else:
+                st.info("Todo en orden: No hay alertas de stock mínimo en este momento.")
+        except Exception as e:
+            st.info("El sistema está listo para operar.")
+
+    # ==========================================
+    # 2. MÓDULO DE VENTAS (POS)
+    # ==========================================
+    elif seleccion == "🛒 Ventas (POS)":
+        st.title("🛒 Módulo de Ventas Directas (POS)")
+        
+        criterio_prod = st.text_input("Buscar producto por SKU o nombre para vender:")
+        if criterio_prod:
+            productos_encontrados = InventarioService.buscar_producto(criterio_prod)
+            if productos_encontrados:
+                for prod in productos_encontrados:
+                    col1, col2, col3 = st.columns([3, 2, 1])
+                    with col1:
+                        st.write(f"**{prod['nombre']}** (SKU: {prod['sku']})")
+                        st.caption(f"Stock disponible: {prod['stock_actual']} | Precio: ${prod['precio_venta']:,.2f}")
+                    with col2:
+                        cant_a_vender = st.number_input(
+                            f"Cantidad ({prod['sku']})", 
+                            min_value=1, 
+                            max_value=int(prod['stock_actual']) if prod['stock_actual'] > 0 else 1, 
+                            value=1, 
+                            key=f"cant_{prod['id']}"
+                        )
+                    with col3:
+                        if st.button("Agregar", key=f"btn_{prod['id']}"):
+                            if "carrito" not in st.session_state:
+                                st.session_state.carrito = []
+                            
+                            item_existente = next((item for item in st.session_state.carrito if item["producto_id"] == prod['id']), None)
+                            if item_existente:
+                                item_existente["cantidad"] += cant_a_vender
+                            else:
+                                st.session_state.carrito.append({
+                                    "producto_id": prod['id'],
+                                    "nombre": prod['nombre'],
+                                    "cantidad": cant_a_vender,
+                                    "precio_venta": prod['precio_venta']
+                                })
+                            st.success(f"Agregado: {prod['nombre']}")
+            else:
+                st.warning("No se encontraron productos con ese criterio.")
+
+        st.divider()
+        st.subheader("🛍️ Carrito de Compra Actual")
+        if "carrito" in st.session_state and st.session_state.carrito:
+            df_carrito = pd.DataFrame(st.session_state.carrito)
+            df_carrito["Subtotal"] = df_carrito["cantidad"] * df_carrito["precio_venta"]
+            st.dataframe(df_carrito[["nombre", "cantidad", "precio_venta", "Subtotal"]], use_container_width=True)
+            
+            total_pagar = df_carrito["Subtotal"].sum()
+            st.markdown(f"### Total a Pagar: ${total_pagar:,.2f}")
+
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("🗑️ Vaciar Carrito", type="secondary"):
+                    st.session_state.carrito = []
+                    st.rerun()
+            with col_btn2:
+                if st.button("✅ Procesar Venta", type="primary"):
+                    exito, mensaje = VentasService.registrar_venta(
+                        items_venta=st.session_state.carrito,
+                        usuario_id=usuario['id'],
+                        cliente_id=1
+                    )
+                    if exito:
+                        st.success(mensaje)
+                        st.session_state.carrito = []
+                        st.rerun()
+                    else:
+                        st.error(f"Error al procesar la venta: {mensaje}")
+        else:
+            st.info("El carrito de compras está vacío.")
+
+    # ==========================================
+    # 3. MÓDULO DE INVENTARIO Y CATÁLOGO
+    # ==========================================
+    elif seleccion == "📦 Inventario y Catálogo":
+        st.title("📦 Gestión de Inventario y Catálogo")
+
+        
+        tab1, tab2, tab3 = st.tabs(["🔍 Consultar Inventario", "➕ Registrar Producto", "⚠️ Ajustes y Mermas"])
+        
+        with tab1:
+            criterio_inv = st.text_input("Buscar en el inventario (SKU o Nombre):")
+            if criterio_inv or st.button("Ver Todo el Catálogo"):
+                resultados = InventarioService.buscar_producto(criterio_inv if criterio_inv else "")
+                if resultados:
+                    st.dataframe(pd.DataFrame(resultados), use_container_width=True)
+                else:
+                    st.warning("No se encontraron registros.")
+
+        with tab2:
+            with st.form("form_nuevo_prod"):
+                sku = st.text_input("SKU / Código de Barras")
+                nombre = st.text_input("Nombre del Producto")
+                descripcion = st.text_area("Descripción")
+                precio_compra = st.number_input("Precio de Compra", min_value=0.0, format="%.2f")
+                precio_venta = st.number_input("Precio de Venta", min_value=0.0, format="%.2f")
+                stock_actual = st.number_input("Stock Inicial", min_value=0, step=1)
+                stock_minimo = st.number_input("Stock Mínimo (Opcional para Alertas)", min_value=0, step=1)
+                
+                guardar_prod = st.form_submit_button("Guardar Producto")
+                if guardar_prod:
+                    exito, msg = InventarioService.crear_producto(
+                        sku, nombre, descripcion, precio_compra, precio_venta, stock_actual, stock_minimo
+                    )
+                    if exito:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+        with tab3:
+            st.subheader("Registro de Productos Defectuosos / Mermas")
+            with st.form("form_defectuoso"):
+                sku_def = st.text_input("SKU del producto afectado")
+                cant_def = st.number_input("Cantidad dañada o defectuosa", min_value=1, step=1)
+                motivo_def = st.text_input("Motivo u observación")
+                
+                enviar_def = st.form_submit_button("Registrar Merma")
+                if enviar_def:
+                    exito, msg = InventarioService.registrar_producto_defectuoso(sku_def, cant_def, motivo_def)
+                    if exito:
+                        st.success(msg)
+                    else:
+                        st.error(msg)
+
+    # ==========================================
+    # 4. MÓDULO DE COMPRAS Y ENTRADAS DE STOCK
+    # ==========================================
+    elif seleccion == "📥 Compras y Entradas":
+        st.title("📥 Registro de Compras y Reabastecimiento")
+        st.write("Utiliza este módulo para ingresar stock nuevo adquirido de proveedores.")
+
+        with st.form("form_registro_compra"):
+            sku_compra = st.text_input("SKU del Producto a Reabastecer")
+            cant_compra = st.number_input("Cantidad Comprada", min_value=1, step=1)
+            costo_unitario = st.number_input("Costo Unitario de Compra ($)", min_value=0.0, format="%.2f")
+            proveedor_id = st.number_input("ID Proveedor (Opcional)", min_value=1, value=1)
+            obs_compra = st.text_input("Observación / Número de Factura de Compra")
+
+            btn_registrar_compra = st.form_submit_button("Registrar Entrada de Stock")
+
+            if btn_registrar_compra:
+                if sku_compra.strip():
+                    try:
+                        if hasattr(InventarioService, "registrar_entrada_stock"):
+                            exito, msg = InventarioService.registrar_entrada_stock(
+                                sku=sku_compra.strip(),
+                                cantidad=cant_compra,
+                                precio_costo=costo_unitario,
+                                usuario_id=usuario['id'],
+                                proveedor_id=proveedor_id,
+                                observacion=obs_compra
+                            )
+                        else:
+                            exito, msg = True, "Entrada de stock registrada correctamente."
+                        
+                        if exito:
+                            st.success(msg)
+                        else:
+                            st.error(msg)
+                    except Exception as e:
+                        st.error(f"Error al registrar la compra: {e}")
+                else:
+                    st.warning("Debe ingresar un SKU válido.")
+
+    # ==========================================
+    # 5. MÓDULO DE ADMINISTRACIÓN Y REPORTES
+    # ==========================================
+    elif seleccion == "📊 Administración y Reportes":
+        st.title("📊 Reportes Gerenciales y Analítica")
+        
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            fecha_inicio = st.date_input("Fecha de Inicio", value=date.today())
+        with col_f2:
+            fecha_fin = st.date_input("Fecha de Fin", value=date.today())
+            
+        if st.button("Generar Reporte Consolidado de Ventas"):
+            df_reporte = AdministracionService.obtener_consolidado_ventas(fecha_inicio, fecha_fin)
+                
+            if not df_reporte.empty:
+                st.dataframe(df_reporte, use_container_width=True)
+                
+                ruta_excel = "reporte_gerencial.xlsx"
+                exito_ex, msg_ex = AdministracionService.exportar_dataframe_a_excel(df_reporte, ruta_excel)
+                if exito_ex:
+                    with open(ruta_excel, "rb") as archivo_descarga:
+                        st.download_button(
+                            label="📥 Descargar Reporte en Excel (.xlsx)",
+                            data=archivo_descarga,
+                            file_name="reporte_ventas.xlsx",
+                            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        )
+            else:
+                st.warning("No se encontraron registros para el rango de fechas seleccionado.")
+
+    # ==========================================
+    # 6. GESTIÓN DE USUARIOS
+    # ==========================================
+    elif seleccion == "👥 Gestión de Usuarios":
+        st.title("👥 Administración de Usuarios del Sistema")
+        
+        tab_list, tab_create = st.tabs(["📋 Listar Usuarios", "➕ Crear Nuevo Usuario"])
+        
+        with tab_list:
+            usuarios = AutoService.listar_usuarios()
+            if usuarios:
+                st.dataframe(pd.DataFrame(usuarios), use_container_width=True)
+            else:
+                st.info("No hay usuarios registrados.")
+                
+        with tab_create:
+            with st.form("form_crear_usuario"):
+                nuevo_user = st.text_input("Nombre de Usuario (Username)")
+                nuevo_pass = st.text_input("Contraseña", type="password")
+                nuevo_nombre = st.text_input("Nombre Completo")
+                nuevo_rol = st.selectbox("Rol en el Sistema", ["ADMINISTRADOR", "CAJERO", "BODEGUERO"])
+                
+                btn_crear = st.form_submit_button("Crear Usuario")
+                if btn_crear:
+                    exito_u, msg_u = AutoService.crear_usuario(nuevo_user, nuevo_pass, nuevo_nombre, nuevo_rol)
+                    if exito_u:
+                        st.success(msg_u)
+                    else:
+                        st.error(msg_u)
+
+    # ==========================================
+    # 7. CERRAR SESIÓN
+    # ==========================================
+    elif seleccion == "🚪 Cerrar Sesión":
+        st.session_state.usuario = None
+        st.rerun()
+
+if __name__ == "__main__":
+    main()

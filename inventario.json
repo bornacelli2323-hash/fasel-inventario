@@ -1,0 +1,17 @@
+[
+    {
+        "nombre": "ESP32 DevKit V1",
+        "cantidad": 3,
+        "precio": 30000
+    },
+    {
+        "nombre": "Sensor BME280 (I2C)",
+        "cantidad": 5,
+        "precio": 25000
+    },
+    {
+        "nombre": "Analizador Lógico USB 8CH",
+        "cantidad": 1,
+        "precio": 45000
+    }
+]
