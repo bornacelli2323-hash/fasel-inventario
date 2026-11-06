@@ -79,7 +79,7 @@ class AutoService:
             return False, "El nombre de usuario ya existe"
         finally:
             conexion.close()
-            
+
 class InventarioService:
     """Servicio para el catálogo de productos, búsquedas duales y gestión de bodega filtrado por sucursal."""
 
@@ -90,7 +90,6 @@ class InventarioService:
         conexion.row_factory = sqlite3.Row 
         cursor = conexion.cursor()
         
-        # 1. Búsqueda exacta por SKU dentro de la sucursal activa
         cursor.execute("""
             SELECT id, sku, nombre, stock_actual, precio_venta, negocio 
             FROM productos 
@@ -103,7 +102,6 @@ class InventarioService:
             conexion.close()
             return [dict(producto_exacto)]
         
-        # 2. Búsqueda flexible por nombre o SKU parcial dentro de la sucursal activa
         cursor.execute("""
             SELECT id, sku, nombre, stock_actual, precio_venta, negocio 
             FROM productos 
@@ -116,7 +114,6 @@ class InventarioService:
 
     @staticmethod
     def obtener_negocios_activos():
-        # Reemplaza estos nombres por los que el cliente te haya pedido
         return ["Sucursal 20 de julio", "Sucursal Yucal"]
         
     @staticmethod
@@ -136,13 +133,11 @@ class InventarioService:
         try:
             cursor = conexion.cursor()
             
-            # Validar si el SKU ya existe EXCLUSIVAMENTE en la sucursal actual
             cursor.execute("SELECT id, estado FROM productos WHERE sku = ? AND negocio = ?", (sku, negocio_actual))
             prod_existente = cursor.fetchone()
             
             if prod_existente:
                 if prod_existente['estado'] == 0:
-                    # Si estaba inactivo, lo reactivamos y actualizamos
                     cursor.execute("""
                         UPDATE productos 
                         SET nombre = ?, descripcion = ?, precio_compra = ?, precio_venta = ?, stock_actual = ?, stock_minimo = ?, estado = 1
@@ -153,7 +148,6 @@ class InventarioService:
                 else:
                     return False, f"El SKU '{sku}' ya se encuentra registrado y activo en esta sucursal ({negocio_actual})."
             
-            # Insertar el producto vinculado estrictamente al negocio activo
             cursor.execute("""
                 INSERT INTO productos (sku, nombre, descripcion, precio_compra, precio_venta, stock_actual, stock_minimo, negocio)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -185,14 +179,12 @@ class InventarioService:
 
             producto_id = producto['id']
 
-            # 1. Aumentar stock y costo
             cursor.execute("""
                 UPDATE productos 
                 SET stock_actual = stock_actual + ?, precio_compra = ?
                 WHERE id = ?
             """, (cantidad, precio_costo, producto_id))
 
-            # 2. Registrar movimiento con sucursal
             if fecha_personalizada:
                 cursor.execute("""
                     INSERT INTO movimientos (producto_id, tipo_movimiento, cantidad, precio_unitario, usuario_id, observacion, fecha, negocio)
@@ -347,10 +339,8 @@ class VentasService:
                 if prod['stock_actual'] < cant:
                     raise ValueError(f"Stock insuficiente para '{prod['nombre']}'. Disponible: {prod['stock_actual']}")
                 
-                # 1. Descontar stock
                 cursor.execute("UPDATE productos SET stock_actual = stock_actual - ? WHERE id = ?", (cant, prod_id))
                 
-                # 2. Registrar movimiento asociado a la sucursal activa
                 if fecha_personalizada:
                     cursor.execute("""
                         INSERT INTO movimientos (producto_id, tipo_movimiento, cantidad, precio_unitario, usuario_id, observacion, fecha, negocio)
@@ -367,6 +357,82 @@ class VentasService:
         except Exception as e:
             conexion.rollback()
             return False, str(e)
+        finally:
+            conexion.close()
+
+    @staticmethod
+    def corregir_venta_y_ajustar_inventario(movimiento_id, nuevo_producto_sku):
+        """
+        Corrige un error en el registro de una venta (cambia el producto asociado),
+        reversando el stock del producto erróneo y descontando el del correcto de forma transaccional (ACID).
+        """
+        negocio_actual = st.session_state.get("negocio_actual", "Sucursal Principal")
+        conexion = obtener_conexion()
+        try:
+            conexion.execute("BEGIN TRANSACTION")
+            cursor = conexion.cursor()
+
+            # SELECT AGREGADO CORRECTAMENTE
+            cursor.execute("""
+                SELECT m.id, p.sku, m.cantidad, m.producto_id 
+                FROM movimientos m
+                JOIN productos p ON m.producto_id = p.id
+                WHERE m.id = ? AND m.negocio = ? AND m.tipo_movimiento LIKE '%VENTA%'
+            """, (movimiento_id, negocio_actual))
+            
+            movimiento_actual = cursor.fetchone()
+            
+            if not movimiento_actual:
+                raise Exception("El movimiento de venta especificado no existe o no pertenece a esta sucursal.")
+            
+            sku_antiguo = movimiento_actual[1]
+            cantidad = movimiento_actual[2]
+            prod_id_antiguo = movimiento_actual[3]
+
+            # Reversión de stock antiguo
+            cursor.execute("""
+                UPDATE productos 
+                SET stock_actual = stock_actual + ? 
+                WHERE id = ? AND negocio = ?
+            """, (cantidad, prod_id_antiguo, negocio_actual))
+
+            # Validación de nuevo producto
+            cursor.execute("""
+                SELECT id, stock_actual, nombre FROM productos 
+                WHERE sku = ? AND negocio = ? AND estado = 1
+            """, (nuevo_producto_sku, negocio_actual))
+            nuevo_prod = cursor.fetchone()
+
+            if not nuevo_prod:
+                raise Exception(f"El nuevo producto con SKU '{nuevo_producto_sku}' no existe o está inactivo en {negocio_actual}.")
+            
+            nuevo_prod_id = nuevo_prod[0]
+            stock_disponible = nuevo_prod[1]
+            nombre_nuevo = nuevo_prod[2]
+
+            if stock_disponible < cantidad:
+                raise Exception(f"Stock insuficiente en '{nombre_nuevo}'. Disponible: {stock_disponible}, Requerido: {cantidad}")
+
+            # Descuento de stock nuevo
+            cursor.execute("""
+                UPDATE productos 
+                SET stock_actual = stock_actual - ? 
+                WHERE id = ? AND negocio = ?
+            """, (cantidad, nuevo_prod_id, negocio_actual))
+
+            # Actualización del registro del movimiento
+            cursor.execute("""
+                UPDATE movimientos 
+                SET producto_id = ?, observacion = observacion || ' [CORREGIDO: Producto cambiado a SKU ' || ? || ']'
+                WHERE id = ? AND negocio = ?
+            """, (nuevo_prod_id, nuevo_producto_sku, movimiento_id, negocio_actual))
+
+            conexion.commit()
+            return True, f"Venta corregida con éxito. Stock devuelto a '{sku_antiguo}' y descontado de '{nuevo_producto_sku}'."
+
+        except Exception as e:
+            conexion.rollback()
+            return False, f"Error en la transacción (Revertida): {str(e)}"
         finally:
             conexion.close()
 
@@ -473,8 +539,10 @@ class AdministracionService:
         f_inicio_str = str(fecha_inicio)
         f_fin_str = str(fecha_fin)
 
+        # INCLUYE m.id AS "ID Movimiento" PARA VER EL ID EN REPORTES
         query = """
             SELECT 
+                m.id AS "ID Movimiento",
                 m.fecha AS "Fecha del Movimiento",
                 p.sku AS "SKU",
                 p.nombre AS "Producto",
@@ -508,6 +576,9 @@ class AdministracionService:
             return True, f"Reporte exportado exitosamente a {ruta_archivo}"
         except Exception as e:
             return False, f"Error al generar archivo Excel: {str(e)}"
+
+    
+
     
                 
 

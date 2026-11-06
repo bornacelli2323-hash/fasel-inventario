@@ -73,7 +73,6 @@ def main():
     except Exception:
         sucursales_disponibles = ["Sucursal Principal"]
 
-    # Si cambia la sucursal, vaciamos el carrito para evitar mezcla de stock entre tiendas
     if "negocio_actual" not in st.session_state:
         st.session_state.negocio_actual = sucursales_disponibles[0]
 
@@ -85,7 +84,7 @@ def main():
     )
 
     if negocio_previo != negocio_seleccionado:
-        st.session_state.carrito = []  # Reiniciar carrito al cambiar de sede
+        st.session_state.carrito = []
         st.rerun()
 
     st.sidebar.info(f"Operando en: **{negocio_seleccionado}**")
@@ -96,7 +95,6 @@ def main():
     st.sidebar.caption(f"Rol: {rol_usuario}")
     st.sidebar.divider()
     
-    # Menú principal
     st.sidebar.title("Menú Principal")
     opciones_menu = [
         "📦 Inventario",
@@ -119,14 +117,14 @@ def main():
     st.write(f"Sucursal activa actual: **{negocio_seleccionado}**")
     st.divider()
 
-    # 1. MÓDULO INVENTARIO (Consultar, Editar y Crear)
+    # 1. MÓDULO INVENTARIO
     if menu_opcion == "📦 Inventario":
-        if menu_opcion == "📦 Inventario":
-            tab1, tab2, tab3, tab4 = st.tabs([
-                        "📋 Consultar Catálogo", 
-                        "✏️ Editar Producto", 
-                        "✨ Registrar Nuevo Producto", 
-                        "🗑️ Registrar Merma / Defecto"
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "📋 Consultar Catálogo", 
+            "✏️ Editar Producto", 
+            "✨ Registrar Nuevo Producto", 
+            "🗑️ Registrar Merma / Defecto",
+            "🛠️ Corrección de Ventas"
         ])
         
         with tab1:
@@ -206,7 +204,7 @@ def main():
                 else:
                     st.error(msg)
 
-        with tab4:  # O la pestaña que prefieras habilitar
+        with tab4:
             st.subheader("🗑️ Registro de Productos Defectuosos / Mermas")
             prods_defectuosos = obtener_productos_negocio(negocio_seleccionado)
             
@@ -230,6 +228,54 @@ def main():
             else:
                 st.warning("No hay productos disponibles en esta sucursal.")
 
+        with tab5:
+            st.subheader("🛠️ Auditoría y Corrección de Ventas (Ajuste ACID)")
+            st.info(
+                "⚠️ **Uso exclusivo para Administradores:** Esta herramienta revierte de forma transaccional "
+                "el stock del producto registrado por error y lo transfiere al producto correcto, "
+                "manteniendo la integridad de la base de datos."
+            )
+            
+            if usuario.get('rol') == 'ADMINISTRADOR':
+                prods_correccion = obtener_productos_negocio(negocio_seleccionado)
+                
+                if prods_correccion:
+                    with st.form("form_correccion_venta_inventario"):
+                        col_c1, col_c2 = st.columns(2)
+                        with col_c1:
+                            movimiento_id_input = st.number_input(
+                                "ID del Movimiento de Venta a Corregir", 
+                                min_value=1, 
+                                step=1,
+                                help="Número de ID del registro en la tabla de movimientos (consúltalo en el módulo de Reportes)."
+                            )
+                        with col_c2:
+                            opciones_prods_corr = {f"{p['sku']} - {p['nombre']} (Stock: {p['stock_actual']})": p['sku'] for p in prods_correccion}
+                            prod_sel_label = st.selectbox(
+                                "Seleccione el Producto Correcto:", 
+                                list(opciones_prods_corr.keys()),
+                                help="Elige de la lista el producto al que realmente debió asociarse la venta."
+                            )
+                            nuevo_sku_input = opciones_prods_corr[prod_sel_label]
+                            
+                        btn_ejecutar_correccion = st.form_submit_button("🔄 Ejecutar Corrección Transaccional", type="primary")
+                        
+                        if btn_ejecutar_correccion:
+                            exito_corr, msg_corr = VentasService.corregir_venta_y_ajustar_inventario(
+                                int(movimiento_id_input), 
+                                nuevo_sku_input
+                            )
+                            
+                            if exito_corr:
+                                st.success(f"¡Operación exitosa! {msg_corr}")
+                                st.balloons()
+                            else:
+                                st.error(f"Error en la transacción: {msg_corr}")
+                else:
+                    st.warning("No hay productos registrados en esta sucursal.")
+            else:
+                st.warning("🔒 Acceso restringido. Solo los usuarios con rol ADMINISTRADOR pueden realizar correcciones de ventas.")
+
     # 2. MÓDULO COMPRAS / ENTRADAS
     elif menu_opcion == "📥 Compras / Entradas":
         st.subheader("📥 Registro de Compras y Entradas de Stock")
@@ -240,13 +286,23 @@ def main():
             prod_seleccionado_label = st.selectbox("Seleccione el producto de la lista:", list(opciones_dict.keys()))
             producto_elegido = opciones_dict[prod_seleccionado_label]
             
-            cant_ent = st.number_input("Cantidad a ingresar:", min_value=1, value=1, step=1)
-            costo_ent = st.number_input("Precio de Costo unitario ($):", min_value=0.0, value=float(producto_elegido['precio_compra']))
-            obs_ent = st.text_input("Observación / Factura de compra:")
+            col_comp1, col_comp2 = st.columns(2)
+            with col_comp1:
+                cant_ent = st.number_input("Cantidad a ingresar:", min_value=1, value=1, step=1)
+                costo_ent = st.number_input("Precio de Costo unitario ($):", min_value=0.0, value=float(producto_elegido['precio_compra']))
+            with col_comp2:
+                fecha_compra = st.date_input("Fecha del Movimiento / Compra:")
+                obs_ent = st.text_input("Observación / Factura de compra:")
             
             if st.button("Guardar Entrada de Stock", type="primary"):
+                fecha_str = f"{fecha_compra} 12:00:00"
                 exito, msg = InventarioService.registrar_entrada_stock(
-                    producto_elegido['sku'], int(cant_ent), float(costo_ent), usuario['id'], observacion=obs_ent
+                    producto_elegido['sku'], 
+                    int(cant_ent), 
+                    float(costo_ent), 
+                    usuario['id'], 
+                    observacion=obs_ent,
+                    fecha_personalizada=fecha_str
                 )
                 if exito:
                     st.success(msg)
@@ -256,7 +312,7 @@ def main():
         else:
             st.warning("No hay productos registrados en esta sucursal. Por favor, agregue productos primero en el módulo de Inventario.")
 
-    # 3. MÓDULO VENTAS / POS (CON CARRITO DE COMPRAS COMPLETO)
+    # 3. MÓDULO VENTAS / POS (CON REGISTRO DE FECHA PERSONALIZADA)
     elif menu_opcion == "💰 Ventas / POS":
         st.subheader("💰 Terminal de Ventas / POS")
         productos_disponibles = obtener_productos_negocio(negocio_seleccionado)
@@ -270,7 +326,6 @@ def main():
                 prod_venta_label = st.selectbox("Seleccione el producto:", list(opciones_dict.keys()))
                 producto_venta = opciones_dict[prod_venta_label]
                 
-                # Calcular disponible restando lo que ya está en el carrito
                 cant_en_carrito = sum(item['cantidad'] for item in st.session_state.carrito if item['producto_id'] == producto_venta['id'])
                 stock_disponible_real = producto_venta['stock_actual'] - cant_en_carrito
                 
@@ -281,7 +336,6 @@ def main():
                     precio_v = st.number_input("Precio de Venta Unitario ($):", min_value=0.0, value=float(producto_venta['precio_venta']))
                     
                     if st.button("➕ Agregar al Carrito", type="secondary"):
-                        # Si ya existe en el carrito, sumamos la cantidad
                         encontrado = False
                         for item in st.session_state.carrito:
                             if item['producto_id'] == producto_venta['id']:
@@ -309,7 +363,6 @@ def main():
                 if st.session_state.carrito:
                     total_venta = 0.0
                     
-                    # Mostrar cada ítem con opción de eliminar individualmente
                     for idx, item in enumerate(st.session_state.carrito):
                         c1, c2, c3, c4 = st.columns([3, 1, 2, 1])
                         with c1:
@@ -327,13 +380,23 @@ def main():
                     st.divider()
                     st.markdown(f"### **Total Venta: ${total_venta:,.2f}**")
                     
+                    # CAMPO DE FECHA DE VENTA (Captura la fecha antes de cobrar)
+                    fecha_venta = st.date_input("Fecha de la Venta / Transacción:", key="fecha_venta_pos")
+                    
                     col_b1, col_b2 = st.columns(2)
                     with col_b1:
                         if st.button("✅ Procesar y Cobrar Venta", type="primary"):
-                            exito, msg = VentasService.registrar_venta(st.session_state.carrito, usuario['id'])
+                            # Formateamos la fecha ingresada por el usuario para enviarla a SQLite
+                            fecha_str = f"{fecha_venta} 12:00:00"
+                            
+                            exito, msg = VentasService.registrar_venta(
+                                items_venta=st.session_state.carrito, 
+                                usuario_id=usuario['id'],
+                                fecha_personalizada=fecha_str
+                            )
                             if exito:
                                 st.success(msg)
-                                st.session_state.carrito = []  # Vaciar carrito tras la venta
+                                st.session_state.carrito = []
                                 st.rerun()
                             else:
                                 st.error(msg)
@@ -345,7 +408,7 @@ def main():
                     st.info("El carrito está vacío. Agregue productos desde la lista de la izquierda.")
         else:
             st.warning("No hay productos con stock disponible para la venta en esta sucursal.")
-
+            
     # 4. MÓDULO REPORTES Y MOVIMIENTOS
     elif menu_opcion == "📊 Reportes y Movimientos":
         st.subheader("📊 Reportes Gerenciales y Auditoría")
